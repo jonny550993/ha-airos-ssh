@@ -1043,6 +1043,21 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 
+    # Keep only one MAC Address sensor per device.
+    mac_seen = set()
+    deduped = []
+    for s in sensors:
+        name = (s._attr_name or "").lower()
+        kind = getattr(s, "_device_kind", "main")
+        is_mac = "mac address" in name or name.endswith(" mac") or name == "mac"
+        if is_mac:
+            if kind in mac_seen:
+                continue
+            mac_seen.add(kind)
+        deduped.append(s)
+    sensors = deduped
+
+    sensors.sort(key=lambda s: (s._attr_name or "").lower())
     async_add_entities(sensors)
 
 
