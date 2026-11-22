@@ -150,7 +150,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         name=f"{display_name} Ethernet",
         manufacturer="Ubiquiti",
         model=(data.get("device_model") or "Original airOS 3.x–4.x") + " Ethernet",
-        via_device=(DOMAIN, dev_id),
+        via_device_id=system_device.id,
     )
 
     # Wireless child device
@@ -160,7 +160,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         name=f"{display_name} Wireless",
         manufacturer="Ubiquiti",
         model=(data.get("device_model") or "Original airOS 3.x–4.x") + " Wireless",
-        via_device=(DOMAIN, dev_id),
+        via_device_id=system_device.id,
     )
 
     # Migrate legacy lan/ethernet child identifiers

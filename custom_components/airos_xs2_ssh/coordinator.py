@@ -335,8 +335,14 @@ class AiRXS2Coordinator(DataUpdateCoordinator):
 
         # Firmware version
         fv = data.get("firmwareVersion") or data.get("firmware_version") or data.get("fwversion")
+        if not fv:
+            for k, v in data.items():
+                if re.sub(r"[^a-z0-9]", "", str(k).lower()) in {"firmwareversion", "fwversion", "firmware"} and str(v).strip():
+                    fv = str(v).strip()
+                    break
         if fv:
             data["firmware_version"] = fv
+            data.setdefault("firmwareVersion", fv)
 
         # Uptime - keep uptime_seconds
         # CPU usage already set
@@ -575,8 +581,10 @@ class AiRXS2Coordinator(DataUpdateCoordinator):
         elif name == "version":
             # The legacy /etc/version file often contains the full firmware build,
             # even when mca-status does not expose firmwareVersion.
-            if re.search(r"(?i)(?:XS[25]|NS[25]|NanoStation)", output) and re.search(r"\d+\.\d+\.\d+", output):
-                data.setdefault("firmwareVersion", output.strip().splitlines()[0])
+            line = output.strip().splitlines()[0].strip() if output.strip() else ""
+            if line and re.search(r"\d+\.\d+\.\d+", line):
+                data.setdefault("firmwareVersion", line)
+                data.setdefault("firmware_version", line)
             self._identify_device(data, output)
         elif name == "board":
             # Some firmware exposes model/board identity in this file.
