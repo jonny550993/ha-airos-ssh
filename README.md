@@ -11,13 +11,73 @@ A Home Assistant custom integration for monitoring legacy Ubiquiti airOS radios.
 ## Features
 
 - Home Assistant UI setup
-- Wireless signal, noise, CCQ, SNR, and TX/RX rate monitoring
-- Device hostname, IP/MAC addresses, uptime, and firmware information
-- Best-effort CPU, memory, load, and system diagnostics where supported
-- LAN, wireless, and PPP interface counters when available
+- SSH-based polling for legacy Ubiquiti NanoStation5 airOS devices
+- Sensors for system, Ethernet, and wireless information (as exposed by device commands)
 - Reboot button
 
-Sensor availability depends on the radio model, firmware, and commands or counters exposed by the device. Optional diagnostic probes are best-effort.
+## Sensors
+
+### System
+- Device status (`mca-status`)
+- Device name (`cat /tmp/system.cfg`)
+- Device model (`mca-status`)
+- Device ID (`mca-status`)
+- Firmware version (`cat /etc/version`)
+- Kernel version (`uname -a`)
+- Uptime (`uptime`)
+- CPU usage (`top`)
+- System load (`uptime`)
+- Total memory (`free`)
+- Free memory (`free`)
+- Running processes (`ps`)
+- System date/time (`date`)
+- System logs (`logread`)
+- Storage usage (`df -h`)
+- Filesystem mounts (`mount`)
+
+### Ethernet
+- Ethernet interface (`ifconfig eth0`)
+- Ethernet MAC address (`ifconfig eth0`)
+- LAN IP address (`ifconfig br0`)
+- Subnet mask (`ifconfig br0`)
+- Ethernet link status (`mca-status`)
+- Ethernet speed (`mca-status`)
+- Ethernet duplex (`mca-status`)
+- RX bytes (`cat /proc/net/dev`)
+- TX bytes (`cat /proc/net/dev`)
+- RX packets (`ifconfig eth0`)
+- TX packets (`ifconfig eth0`)
+- RX errors (`ifconfig eth0`)
+- TX errors (`ifconfig eth0`)
+- RX dropped packets (`ifconfig eth0`)
+- TX dropped packets (`ifconfig eth0`)
+- Routing table (`route -n`)
+- ARP table (`arp -n`)
+- Bridge information (`brctl show`)
+
+### Wireless
+- Wireless interface (`iwconfig ath0`)
+- Wireless MAC address (`iwconfig ath0`)
+- Wireless mode (`iwconfig ath0`)
+- SSID (`iwconfig ath0`)
+- Frequency (`iwconfig ath0`)
+- Channel (`iwconfig ath0`)
+- Channel width (`iwconfig ath0`)
+- TX power (`iwconfig ath0`)
+- Signal strength (dBm) (`mca-status`)
+- Noise floor (dBm) (`mca-status`)
+- SNR (dB) (calculated from signal and noise)
+- CCQ (%) (`mca-status`)
+- TX data rate (`iwconfig ath0`)
+- RX data rate (`iwconfig ath0`)
+- Wireless RX bytes (`mca-status`)
+- Wireless TX bytes (`mca-status`)
+- Wireless RX errors (`mca-status`)
+- Wireless TX errors (`mca-status`)
+- Wireless retries (`athstats`)
+- Connected stations (`wstalist`)
+- Radio statistics (`athstats`)
+- Available networks (`iwlist ath0 scan`)
 
 ## Compatibility
 
@@ -56,7 +116,7 @@ The integration requires the `asyncssh` dependency declared in its manifest.
 
 - Confirm SSH access to the radio from the Home Assistant host.
 - Check the configured IP address and credentials.
-- Some older firmware does not support every diagnostic command or counter; missing optional sensors may be expected.
+- Some older firmware does not support every diagnostic command or counter.
 - Remove passwords, private keys, and other secrets before sharing logs.
 
 ## Security

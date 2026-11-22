@@ -1,10 +1,11 @@
-import asyncio
-import asyncssh
 import logging
 import re
 from datetime import timedelta
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+import asyncssh
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,13 +26,31 @@ def _number(value, default=None):
         return default
 
 
+def _first_line(text: str) -> str:
+    for line in _to_text(text).splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
+def _parse_kv_output(output: str) -> dict:
+    data = {}
+    for line in _to_text(output).splitlines():
+        if "=" in line:
+            key, value = line.strip().split("=", 1)
+            data[key.strip()] = value.strip()
+    return data
+
+
 class AiRXS2Coordinator(DataUpdateCoordinator):
+    """Poll a legacy Ubiquiti NanoStation5 over SSH."""
+
     def __init__(self, hass: HomeAssistant, host, username, password, name):
         self.host = host
         self.username = username
         self.password = password
         self.device_name = name
-        self._previous_cpu_stats = None
 
         super().__init__(
             hass,
@@ -40,14 +59,14 @@ class AiRXS2Coordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
 
-    async def _run_command(self, conn, command):
-        """Run a read-only command without relying on completed-result attributes."""
+    async def _run_command(self, conn, command: str) -> str:
         async with conn.create_process(command) as proc:
             stdout = await proc.stdout.read()
             stderr = await proc.stderr.read()
             await proc.wait()
-        output = _to_text(stdout)
-        return output if output.strip() else _to_text(stderr)
+        out = _to_text(stdout).strip()
+        err = _to_text(stderr).strip()
+        return out if out else err
 
     async def _async_update_data(self):
         try:
@@ -60,438 +79,362 @@ class AiRXS2Coordinator(DataUpdateCoordinator):
                 encryption_algs=["aes128-cbc"],
                 server_host_key_algs=["ssh-rsa"],
             ) as conn:
-                output = await self._run_command(conn, "mca-status")
-                if "=" not in output:
-                    raise UpdateFailed(
-                        f"mca-status returned no key=value output: {output[:200]}"
-                    )
-                data = self._parse_output(output)
+                commands = {
+                    "mca_status": "mca-status",
+                    "system_cfg": "cat /tmp/system.cfg",
+                    "version": "cat /etc/version",
+                    "uname": "uname -a",
+                    "uptime": "uptime",
+                    "top": "top -b -n1 | head -n 5",
+                    "free": "free",
+                    "ps": "ps",
+                    "date": "date",
+                    "logread": "logread | tail -n 50",
+                    "df": "df -h",
+                    "mount": "mount",
+                    "ifconfig_eth0": "ifconfig eth0",
+                    "ifconfig_br0": "ifconfig br0",
+                    "ifconfig": "ifconfig",
+                    "proc_net_dev": "cat /proc/net/dev",
+                    "route": "route -n",
+                    "arp": "arp -n",
+                    "brctl": "brctl show",
+                    "iwconfig_ath0": "iwconfig ath0",
+                    "athstats": "athstats",
+                    "wstalist": "wstalist",
+                    "iwlist_scan": "iwlist ath0 scan | head -n 120",
+                }
 
-                # Legacy airOS builds differ significantly. Probe common BusyBox
-                # procfs/network commands independently; missing commands/files are
-                # ignored so one unsupported probe cannot break the core sensors.
-                probes = (
-                    ("uptime", "cat /proc/uptime"),
-                    ("meminfo", "cat /proc/meminfo"),
-                    ("cpu_stat", "cat /proc/stat"),
-                    ("cpu_top", "top -b -n2 -d1"),
-                    ("cpuinfo", "cat /proc/cpuinfo"),
-                    ("version", "cat /etc/version"),
-                    ("board", "cat /etc/board.info"),
-                    ("ifconfig", "ifconfig"),
-                    ("netdev", "cat /proc/net/dev"),
-                )
-                for name, command in probes:
+                results = {}
+                for key, cmd in commands.items():
                     try:
-                        result = await self._run_command(conn, command)
-                        self._parse_probe(name, result, data)
-
-                        # Very old airOS kernels (including XS5 v4.x) expose only
-                        # four /proc/stat counters. The first sample establishes a
-                        # baseline, so take a second sample immediately rather than
-                        # leaving CPU Usage unknown until the next HA polling cycle.
-                        if name == "cpu_stat" and "cpu_usage" not in data:
-                            await asyncio.sleep(1)
-                            second_sample = await self._run_command(conn, "cat /proc/stat")
-                            self._parse_probe("cpu_stat", second_sample, data)
+                        results[key] = await self._run_command(conn, cmd)
                     except Exception as err:
-                        _LOGGER.debug("airOS probe %s unavailable: %s", name, err)
+                        _LOGGER.debug("Command failed (%s): %s", cmd, err)
+                        results[key] = ""
 
-                self._update_firmware_upgrade_status(data)
-                return data
+                return self._parse_results(results)
 
-        except UpdateFailed:
-            raise
-        except Exception as e:
-            raise UpdateFailed(f"SSH error: {e}") from e
+        except Exception as err:
+            raise UpdateFailed(f"SSH error: {err}") from err
 
-    def _parse_output(self, output: str):
+    def _parse_results(self, r: dict) -> dict:
         data = {}
-        for line in output.splitlines():
-            if "=" in line:
-                key, value = line.strip().split("=", 1)
-                data[key] = value.strip()
+        mca = _parse_kv_output(r.get("mca_status", ""))
 
-        # Some legacy AirOS versions bundle identity metadata into side_devicename,
-        # e.g. "UBNT,deviceId=...,firmwareVersion=...,platform=...,deviceIp=...".
-        # Split those fields into their own values so Home Assistant can expose
-        # them as individual sensors instead of hiding them in the name sensor.
-        for key, value in list(data.items()):
-            # Depending on the AirOS generation, identity metadata is returned
-            # under side_devicename or deviceName. Both may contain a comma-
-            # separated metadata blob rather than just a human-readable name.
-            if key.lower() not in {"side_devicename", "devicename"}:
-                continue
-            parts = [part.strip() for part in value.split(",")]
-            data[key] = parts[0] or "AirOS Device"
-            metadata_keys = {
-                "deviceid": "deviceId",
-                "firmwareversion": "firmwareVersion",
-                "platform": "platform",
-                "deviceip": "deviceIp",
-            }
-            for part in parts[1:]:
-                if "=" not in part:
-                    continue
-                metadata_key, metadata_value = part.split("=", 1)
-                canonical_key = metadata_keys.get(metadata_key.strip().lower())
-                metadata_value = metadata_value.strip()
-                if canonical_key and metadata_value:
-                    data.setdefault(canonical_key, metadata_value)
+        # 1. System
+        data["device_status"] = "ok" if mca else "unavailable"
+        data["device_status_raw"] = r.get("mca_status", "")
+        data["device_name"] = self._parse_device_name(r.get("system_cfg", ""), mca)
+        data["device_model"] = mca.get("deviceName") or mca.get("platform") or mca.get("board.hwaddr") or "NanoStation5 Legacy"
+        data["device_id"] = mca.get("deviceId") or mca.get("device_id") or mca.get("apMac") or ""
+        data["firmware_version"] = _first_line(r.get("version", "")) or mca.get("firmwareVersion", "")
+        data["kernel_version"] = _first_line(r.get("uname", ""))
+        data["uptime"] = _first_line(r.get("uptime", ""))
+        self._parse_cpu_load(r.get("uptime", ""), r.get("top", ""), data)
+        self._parse_free(r.get("free", ""), data)
+        data["running_processes"] = self._count_lines(r.get("ps", ""), header=True)
+        data["running_processes_raw"] = r.get("ps", "")
+        data["system_datetime"] = _first_line(r.get("date", ""))
+        data["system_logs"] = self._tail_summary(r.get("logread", ""))
+        data["system_logs_raw"] = r.get("logread", "")
+        data["storage_usage"] = self._df_summary(r.get("df", ""))
+        data["storage_usage_raw"] = r.get("df", "")
+        data["filesystem_mounts"] = self._count_lines(r.get("mount", ""), header=False)
+        data["filesystem_mounts_raw"] = r.get("mount", "")
 
-            # Keep the legacy side_devicename entity ID working if the device
-            # reports its name using the newer deviceName key.
-            if key.lower() == "devicename":
-                data.setdefault("side_devicename", data[key])
-                data.pop(key, None)
+        # 2. Ethernet
+        eth0 = r.get("ifconfig_eth0", "")
+        br0 = r.get("ifconfig_br0", "")
+        proc_dev = r.get("proc_net_dev", "")
+        data["eth_interface"] = "eth0" if "eth0" in eth0 else ""
+        data["eth_mac"] = self._parse_mac(eth0) or mca.get("lanMac", "")
+        data["lan_ip"] = self._parse_ip(br0) or self._parse_ip(eth0)
+        data["lan_subnet"] = self._parse_mask(br0) or self._parse_mask(eth0)
+        self._parse_eth_link(mca, eth0, data)
+        self._parse_proc_net_dev(proc_dev, "eth0", "eth", data)
+        self._parse_ifconfig_counters(eth0, "eth", data)
+        data["routing_table"] = self._count_lines(r.get("route", ""), header=True)
+        data["routing_table_raw"] = r.get("route", "")
+        data["arp_table"] = self._count_lines(r.get("arp", ""), header=True)
+        data["arp_table_raw"] = r.get("arp", "")
+        data["bridge_info"] = self._count_lines(r.get("brctl", ""), header=True)
+        data["bridge_info_raw"] = r.get("brctl", "")
 
-        # Canonicalise firmware-specific spellings into stable main-device sensors.
-        lookup = {re.sub(r"[^a-z0-9]", "", str(k).lower()): v for k, v in data.items()}
-        aliases = {
-            "firmwareVersion": ("firmwareVersion", "firmware_version", "fwversion", "firmware", "version"),
-            "apmac": ("apmac","ap_mac","apmacaddr","wlan_apmac"),
-            "cfg_crc": ("cfgcrc","cfg_crc","configcrc","config_crc"),
-            "distance": ("distance","linkdistance","dist"),
-            "ack_timeout": ("acktimeout","ack_timeout"),
-            "latitude": ("latitude","lat"), "longitude": ("longitude","lon","lng"),
-            "radio_date_time": ("datetime","radio_datetime","date_time","radio_date_time"),
-            "ppp_ip": ("pppip","ppp_ip","pppaddress"),
-            "lan_ip_address": ("lan_ip_address", "lip", "lan_ip", "ethernet_ip_address"),
-            "lan_mac_address": ("lan_mac_address", "lmac", "ethernet_mac_address"),
-        }
-        for target, candidates in aliases.items():
-            for candidate in candidates:
-                value = lookup.get(re.sub(r"[^a-z0-9]", "", candidate))
-                if value not in (None, ""):
-                    data.setdefault(target, value)
-                    break
+        # 3. Wireless
+        iw = r.get("iwconfig_ath0", "")
+        data["wlan_interface"] = "ath0" if "ath0" in iw else ""
+        data["wlan_mac"] = self._parse_iw_mac(iw) or mca.get("wlanOpmode", "") and mca.get("apMac", "") or mca.get("apMac", "")
+        # prefer wlanHwAddr/wlanMac-like keys if present
+        for k in ("wlanMac", "wlanHwAddr", "ath0_hwaddr", "apMac"):
+            if mca.get(k):
+                data["wlan_mac"] = mca.get(k)
+                break
+        self._parse_iwconfig(iw, mca, data)
+        self._parse_wireless_mca(mca, data)
+        self._parse_athstats(r.get("athstats", ""), data)
+        self._parse_wstalist(r.get("wstalist", ""), data)
+        data["available_networks"] = self._count_iwlist_scan(r.get("iwlist_scan", ""))
+        data["available_networks_raw"] = r.get("iwlist_scan", "")
 
-        # Keep installed firmware under one canonical key. Prefer explicit
-        # firmware fields, but accept legacy status.cgi/mca-status spellings.
-        if data.get("firmwareVersion") not in (None, ""):
-            for alias in ("firmware_version", "fwversion", "firmware", "version"):
-                alias_key = next(
-                    (key for key in data if re.sub(r"[^a-z0-9]", "", str(key).lower())
-                     == re.sub(r"[^a-z0-9]", "", alias)),
-                    None,
-                )
-                if alias_key is not None and alias_key != "firmwareVersion":
-                    data.pop(alias_key, None)
-        self._identify_device(data, output)
-
-        # Expose only one canonical uptime sensor, populated by the procfs probe.
-        # airOS firmware may also report uptime-like keys in mca-status; discard
-        # those aliases so they cannot create duplicate entities.
-        for key in list(data):
-            if key.lower() in {"uptime", "uptime_seconds", "systemuptime"}:
-                data.pop(key, None)
-
-        # Missing or malformed readings must stay unavailable, not look like real zeroes.
-        for key in ("signal", "noise", "wlanTxRate", "wlanRxRate", "frequency"):
-            value = _number(data.get(key))
-            if value is None:
-                data.pop(key, None)
-            else:
-                data[key] = value
-
-        raw_ccq = _number(data.get("ccq"))
-        if raw_ccq is None:
-            data.pop("ccq", None)
-        else:
-            # AirOS mca-status reports CCQ in tenths of a percent.
-            data["ccq"] = raw_ccq / 10
-
-        if "signal" in data and "noise" in data:
-            data["snr"] = data["signal"] - data["noise"]
-        else:
-            data.pop("snr", None)
+        # Normalize empty strings to None for cleaner sensors
+        for k, v in list(data.items()):
+            if isinstance(v, str):
+                v = v.strip()
+                data[k] = v if v else None
         return data
 
     @staticmethod
-    def _identify_device(data, extra_output=""):
-        """Identify original airOS 3.x-4.x hardware from legacy metadata."""
-        identity_keys = {
-            "platform", "deviceid", "board", "boardname", "board_name",
-            "product", "productname", "model", "devicemodel", "hardware",
-        }
-        parts = [extra_output]
-        for key, value in data.items():
-            if (key.lower() in identity_keys or key.lower() in {"firmwareversion", "cpu_model"}
-                    or key.lower().endswith(("_platform", "_deviceid", "_board", "_boardname", "_product", "_productname", "_model", "_devicemodel", "_hardware", "_firmwareversion"))):
-                parts.append(str(value))
-        identity = " ".join(parts)
-        compact = re.sub(r"[^a-z0-9]", "", identity.lower())
-
-        # Prefer explicit product identifiers. XS2/XS5 firmware prefixes are
-        # only a fallback because several original airOS products share them.
-        model_aliases = (
-            ("nanostationloco2", "NanoStation Loco2"),
-            ("nanostationloco5", "NanoStation Loco5"),
-            ("loco2", "NanoStation Loco2"),
-            ("loco5", "NanoStation Loco5"),
-            ("picostation2", "PicoStation 2"),
-            ("picostation5", "PicoStation 5"),
-            ("powerstation2", "PowerStation 2"),
-            ("powerstation5", "PowerStation 5"),
-            ("ps2", "PowerStation 2"),
-            ("ps5", "PowerStation 5"),
-            ("pico2", "PicoStation 2"),
-            ("pico5", "PicoStation 5"),
-            ("bullet2", "Bullet2"),
-            ("bullet5", "Bullet5"),
-            ("nanostation2", "NanoStation 2"),
-            ("nanostation5", "NanoStation 5"),
-            ("ns2", "NanoStation 2"),
-            ("ns5", "NanoStation 5"),
-        )
-        for alias, label in model_aliases:
-            if alias in compact:
-                data["device_model"] = label
-                return
-
-        firmware = str(data.get("firmwareVersion") or "")
-        if not firmware:
-            firmware_match = re.search(r"(?i)\b(XS[25])\b", identity)
-            firmware = firmware_match.group(1) if firmware_match else ""
-        if firmware.upper().startswith("XS2") or re.search(r"(?i)\b(?:NS2|XS2)\b", identity):
-            data["device_model"] = "NanoStation 2"
-        elif firmware.upper().startswith("XS5") or re.search(r"(?i)\b(?:NS5|XS5)\b", identity):
-            data["device_model"] = "NanoStation 5"
-        # Match the HTTP integration: do not expose a raw platform or board
-        # identifier as the device model. If the model is not recognized, the
-        # sensor platform uses the shared generic airOS fallback.
+    def _parse_device_name(system_cfg: str, mca: dict) -> str:
+        for line in _to_text(system_cfg).splitlines():
+            if line.startswith("resolv.host.1.name="):
+                return line.split("=", 1)[1].strip()
+            if line.startswith("host.hostname="):
+                return line.split("=", 1)[1].strip()
+        return mca.get("deviceName") or mca.get("hostName") or ""
 
     @staticmethod
-    def _update_firmware_upgrade_status(data):
-        """Compare supported legacy NanoStation5 firmware with Ubiquiti's published release."""
-        # Ubiquiti's published final legacy NanoStation5 release is v4.0.4
-        # build 5074. Do not extrapolate this catalog entry to other models.
-        data["firmware_upgrade_latest_version"] = "4.0.4.5074"
-        data["firmware_upgrade_source"] = "https://ui.com/download/airmax-legacy"
-
-        if data.get("device_model") != "NanoStation 5":
-            data["firmware_upgrade"] = "Unknown"
-            data["firmware_upgrade_reason"] = "No verified firmware catalog entry for this device model."
-            return
-
-        installed = str(data.get("firmwareVersion") or "")
-        match = re.search(r"v?(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?", installed, re.IGNORECASE)
-        if not match:
-            data["firmware_upgrade"] = "Unknown"
-            data["firmware_upgrade_reason"] = "Installed firmware version could not be parsed."
-            return
-
-        installed_version = tuple(int(part or 0) for part in match.groups())
-        latest_version = (4, 0, 4, 5074)
-        data["firmware_upgrade_installed_version"] = installed
-        if installed_version < latest_version:
-            data["firmware_upgrade"] = "Update available"
-            data["firmware_upgrade_reason"] = "A newer published legacy NanoStation5 firmware version exists. Check release notes and upgrade prerequisites before installing."
-        elif installed_version == latest_version:
-            data["firmware_upgrade"] = "Up to date"
-            data["firmware_upgrade_reason"] = "Installed version matches the published legacy NanoStation5 release."
+    def _parse_cpu_load(uptime_out: str, top_out: str, data: dict):
+        load_match = re.search(r"load average[s]?:\s*([0-9.]+)[, ]+([0-9.]+)[, ]+([0-9.]+)", uptime_out)
+        if load_match:
+            data["system_load"] = f"{load_match.group(1)}, {load_match.group(2)}, {load_match.group(3)}"
         else:
-            data["firmware_upgrade"] = "Unknown"
-            data["firmware_upgrade_reason"] = "Installed version is newer than the catalog entry; automatic comparison is inconclusive."
+            data["system_load"] = None
 
-    def _parse_probe(self, name, output, data):
-        if not output:
+        cpu = None
+        for line in _to_text(top_out).splitlines():
+            m = re.search(r"CPU:.*?([0-9.]+)%\s*idle", line, re.IGNORECASE)
+            if m:
+                cpu = round(max(0.0, 100.0 - float(m.group(1))), 2)
+                break
+            m = re.search(r"([0-9.]+)\s*%?\s*id", line, re.IGNORECASE)
+            if m and "cpu" in line.lower():
+                cpu = round(max(0.0, 100.0 - float(m.group(1))), 2)
+                break
+        data["cpu_usage"] = cpu
+
+    @staticmethod
+    def _parse_free(free_out: str, data: dict):
+        total = free = None
+        for line in _to_text(free_out).splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0].lower().startswith("mem"):
+                nums = [int(p) for p in parts[1:] if p.isdigit()]
+                if len(nums) >= 2:
+                    total, used, free_mem = (nums + [None, None, None])[:3]
+                    # busybox free: total used free shared buffers
+                    data["memory_total"] = total
+                    data["memory_free"] = free_mem
+                    return
+        data["memory_total"] = None
+        data["memory_free"] = None
+
+    @staticmethod
+    def _count_lines(text: str, header=False) -> int | None:
+        lines = [l for l in _to_text(text).splitlines() if l.strip()]
+        if not lines:
+            return None
+        if header and len(lines) > 0:
+            return max(0, len(lines) - 1)
+        return len(lines)
+
+    @staticmethod
+    def _tail_summary(text: str) -> str | None:
+        lines = [l.strip() for l in _to_text(text).splitlines() if l.strip()]
+        if not lines:
+            return None
+        return f"{len(lines)} entries"
+
+    @staticmethod
+    def _df_summary(text: str) -> str | None:
+        lines = [l for l in _to_text(text).splitlines() if l.strip()]
+        if len(lines) < 2:
+            return None
+        # return summary of root or last data line
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) >= 5 and parts[-1] in ("/", "/tmp", "/etc"):
+                return f"{parts[-1]} {parts[-2]} used"
+        parts = lines[-1].split()
+        if len(parts) >= 5:
+            return f"{parts[-1]} {parts[-2]} used"
+        return f"{len(lines)-1} filesystems"
+
+    @staticmethod
+    def _parse_mac(text: str) -> str | None:
+        m = re.search(r"HWaddr\s+([0-9A-Fa-f:]{17})", text)
+        if m:
+            return m.group(1).upper()
+        m = re.search(r"ether\s+([0-9A-Fa-f:]{17})", text)
+        return m.group(1).upper() if m else None
+
+    @staticmethod
+    def _parse_ip(text: str) -> str | None:
+        m = re.search(r"inet addr:([0-9.]+)", text)
+        if m:
+            return m.group(1)
+        m = re.search(r"\binet\s+([0-9.]+)", text)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _parse_mask(text: str) -> str | None:
+        m = re.search(r"Mask:([0-9.]+)", text)
+        if m:
+            return m.group(1)
+        m = re.search(r"netmask\s+([0-9.]+)", text)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _parse_eth_link(mca: dict, eth0: str, data: dict):
+        plugged = mca.get("lan plugged") or mca.get("lanPlugged") or mca.get("plugged")
+        if plugged is not None:
+            data["eth_link_status"] = "up" if str(plugged).lower() in ("1", "true", "yes", "up") else "down"
+        else:
+            data["eth_link_status"] = "up" if "RUNNING" in eth0 else ("down" if eth0 else None)
+        data["eth_speed"] = mca.get("lanSpeed") or mca.get("eth0.speed")
+        data["eth_duplex"] = mca.get("lanDuplex") or mca.get("eth0.duplex")
+
+    @staticmethod
+    def _parse_proc_net_dev(proc_dev: str, iface: str, prefix: str, data: dict):
+        for line in _to_text(proc_dev).splitlines():
+            if ":" not in line:
+                continue
+            name, rest = line.split(":", 1)
+            if name.strip() != iface:
+                continue
+            vals = rest.split()
+            if len(vals) >= 16:
+                data[f"{prefix}_rx_bytes"] = _number(vals[0])
+                data[f"{prefix}_rx_packets_proc"] = _number(vals[1])
+                data[f"{prefix}_rx_errors_proc"] = _number(vals[2])
+                data[f"{prefix}_rx_dropped"] = _number(vals[3])
+                data[f"{prefix}_tx_bytes"] = _number(vals[8])
+                data[f"{prefix}_tx_packets_proc"] = _number(vals[9])
+                data[f"{prefix}_tx_errors_proc"] = _number(vals[10])
+                data[f"{prefix}_tx_dropped"] = _number(vals[11])
             return
 
-        if name == "uptime":
-            match = re.match(r"\s*([0-9]+(?:\.[0-9]+)?)", output)
-            if match:
-                data["uptime_seconds"] = float(match.group(1))
-        elif name == "meminfo":
-            values = {}
-            for line in output.splitlines():
-                match = re.match(r"^(MemTotal|MemFree|MemAvailable):\s+(\d+)", line)
-                if match:
-                    values[match.group(1)] = int(match.group(2)) * 1024
-            for source, target in (
-                ("MemTotal", "mem_total_bytes"),
-                ("MemFree", "mem_free_bytes"),
-                ("MemAvailable", "mem_available_bytes"),
-            ):
-                if source in values:
-                    data[target] = values[source]
+    @staticmethod
+    def _parse_ifconfig_counters(text: str, prefix: str, data: dict):
+        rx_packets = re.search(r"RX packets:(\d+)", text)
+        tx_packets = re.search(r"TX packets:(\d+)", text)
+        rx_errors = re.search(r"RX packets:\d+.*?errors:(\d+)", text)
+        tx_errors = re.search(r"TX packets:\d+.*?errors:(\d+)", text)
+        rx_dropped = re.search(r"RX packets:\d+.*?dropped:(\d+)", text)
+        tx_dropped = re.search(r"TX packets:\d+.*?dropped:(\d+)", text)
+        rx_bytes = re.search(r"RX bytes:(\d+)", text)
+        tx_bytes = re.search(r"TX bytes:(\d+)", text)
+        # prefer proc values if already set
+        if data.get(f"{prefix}_rx_packets_proc") is None and rx_packets:
+            data[f"{prefix}_rx_packets"] = int(rx_packets.group(1))
+        else:
+            data[f"{prefix}_rx_packets"] = data.pop(f"{prefix}_rx_packets_proc", None) or (int(rx_packets.group(1)) if rx_packets else None)
+        if data.get(f"{prefix}_tx_packets_proc") is None and tx_packets:
+            data[f"{prefix}_tx_packets"] = int(tx_packets.group(1))
+        else:
+            data[f"{prefix}_tx_packets"] = data.pop(f"{prefix}_tx_packets_proc", None) or (int(tx_packets.group(1)) if tx_packets else None)
+        if data.get(f"{prefix}_rx_errors_proc") is None and rx_errors:
+            data[f"{prefix}_rx_errors"] = int(rx_errors.group(1))
+        else:
+            data[f"{prefix}_rx_errors"] = data.pop(f"{prefix}_rx_errors_proc", None) or (int(rx_errors.group(1)) if rx_errors else None)
+        if data.get(f"{prefix}_tx_errors_proc") is None and tx_errors:
+            data[f"{prefix}_tx_errors"] = int(tx_errors.group(1))
+        else:
+            data[f"{prefix}_tx_errors"] = data.pop(f"{prefix}_tx_errors_proc", None) or (int(tx_errors.group(1)) if tx_errors else None)
+        if data.get(f"{prefix}_rx_dropped") is None and rx_dropped:
+            data[f"{prefix}_rx_dropped"] = int(rx_dropped.group(1))
+        if data.get(f"{prefix}_tx_dropped") is None and tx_dropped:
+            data[f"{prefix}_tx_dropped"] = int(tx_dropped.group(1))
+        if data.get(f"{prefix}_rx_bytes") is None and rx_bytes:
+            data[f"{prefix}_rx_bytes"] = int(rx_bytes.group(1))
+        if data.get(f"{prefix}_tx_bytes") is None and tx_bytes:
+            data[f"{prefix}_tx_bytes"] = int(tx_bytes.group(1))
 
-            # Report a single percentage-based RAM sensor. Prefer MemAvailable,
-            # which accounts for reclaimable cache; older kernels may only expose
-            # MemFree, so use that as a fallback.
-            total = data.get("mem_total_bytes")
-            available = data.get("mem_available_bytes", data.get("mem_free_bytes"))
-            if total and available is not None and total > 0:
-                used_percent = (total - available) / total * 100
-                data["ram_usage_percent"] = round(max(0.0, min(100.0, used_percent)), 2)
-        elif name == "cpu_stat":
-            # /proc/stat exposes cumulative CPU time counters. Compare consecutive
-            # samples to calculate actual utilisation rather than load average.
-            lines = output.splitlines()
-            fields = lines[0].split() if lines else []
-            if fields and fields[0] == "cpu" and len(fields) >= 5:
-                try:
-                    counters = [int(value) for value in fields[1:9]]
-                except ValueError:
-                    counters = []
+    @staticmethod
+    def _parse_iw_mac(text: str) -> str | None:
+        m = re.search(r"Access Point:\s*([0-9A-Fa-f:]{17})", text)
+        if m and m.group(1) != "00:00:00:00:00:00":
+            return None
+        m = re.search(r"HWaddr\s+([0-9A-Fa-f:]{17})", text)
+        return m.group(1).upper() if m else None
 
-                if len(counters) >= 4:
-                    total = sum(counters)
-                    idle = counters[3]
-                    if len(counters) >= 5:
-                        idle += counters[4]  # Treat I/O wait as idle time.
+    @staticmethod
+    def _parse_iwconfig(iw: str, mca: dict, data: dict):
+        ssid = re.search(r'ESSID:"?([^"\n]+)"?', iw)
+        freq = re.search(r"Frequency[:=]([0-9.]+)\s*GHz", iw)
+        channel = re.search(r"Channel[:=]([0-9]+)", iw)
+        txpower = re.search(r"Tx-Power[:=]([0-9]+)\s*dBm", iw) or re.search(r"Tx-Power=([0-9]+)", iw)
+        rate = re.search(r"Bit Rate[:=]([0-9.]+)\s*Mb/s", iw)
+        rates = re.findall(r"([0-9.]+)\s*Mb/s", iw)
+        mode = re.search(r"Mode:([A-Za-z-]+)", iw)
+        ap = re.search(r"Access Point:\s*([0-9A-Fa-f:]{17})", iw)
 
-                    previous = self._previous_cpu_stats
-                    self._previous_cpu_stats = (total, idle)
-                    if previous is not None:
-                        total_delta = total - previous[0]
-                        idle_delta = idle - previous[1]
-                        if total_delta > 0 and 0 <= idle_delta <= total_delta:
-                            data["cpu_usage"] = round(
-                                100 * (total_delta - idle_delta) / total_delta, 2
-                            )
-        elif name == "cpu_top":
-            # Some older AirOS builds do not expose usable /proc/stat counters.
-            # Fall back to the CPU summary printed by BusyBox top.
-            if "cpu_usage" not in data:
-                cpu_lines = [
-                    line for line in output.splitlines()
-                    if re.search(r"\bCPU\s*:", line, re.IGNORECASE)
-                ]
-                if cpu_lines:
-                    values = {
-                        label.lower(): float(value)
-                        for value, label in re.findall(
-                            r"(\d+(?:\.\d+)?)\s*%\s*([a-z]+)",
-                            cpu_lines[-1],
-                            re.IGNORECASE,
-                        )
-                    }
-                    idle = values.get("idle")
-                    if idle is not None:
-                        # I/O wait is treated as idle; other reported categories
-                        # (user, system, IRQ, softirq, nice) count as busy.
-                        io_wait = values.get("io", 0.0)
-                        usage = max(0.0, min(100.0, 100.0 - idle - io_wait))
-                        data["cpu_usage"] = round(usage, 2)
-        elif name == "version":
-            # The legacy /etc/version file often contains the full firmware build,
-            # even when mca-status does not expose firmwareVersion.
-            if re.search(r"(?i)(?:XS[25]|NS[25]|NanoStation)", output) and re.search(r"\d+\.\d+\.\d+", output):
-                data.setdefault("firmwareVersion", output.strip().splitlines()[0])
-            self._identify_device(data, output)
-        elif name == "board":
-            # Some firmware exposes model/board identity in this file.
-            self._identify_device(data, output)
-        elif name == "cpuinfo":
-            for line in output.splitlines():
-                if ":" in line and line.split(":", 1)[0].strip().lower() in (
-                    "system type", "model name", "processor"
-                ):
-                    value = line.split(":", 1)[1].strip()
-                    if value:
-                        data["cpu_model"] = value
-                        self._identify_device(data)
-                        break
-        elif name == "ifconfig":
-            # Parse each interface separately; order varies by firmware.
-            # Legacy airOS commonly uses ath0/wlan0, eth0, and br0.
-            blocks = re.split(r"(?m)^(?=[A-Za-z0-9_.:-]+\s+Link encap:)", output)
-            for block in blocks:
-                heading = re.match(r"^([A-Za-z0-9_.:-]+)\s+Link encap:", block)
-                if not heading:
-                    continue
-                interface = heading.group(1).lower()
-                is_wireless = interface.startswith(("wlan", "ath"))
-                is_ethernet = interface.startswith(("eth", "br"))
-                is_ppp = interface.startswith("ppp")
-                if not (is_wireless or is_ethernet or is_ppp):
-                    continue
-                prefix = "wireless" if is_wireless else ("ppp" if is_ppp else "ethernet")
-                mac = re.search(r"(?:HWaddr|ether)\s+([0-9A-Fa-f:]{17})", block)
-                if mac:
-                    data.setdefault(f"{prefix}_mac", mac.group(1))
-                    if is_ethernet:
-                        data.setdefault("mac", mac.group(1))
-                        data.setdefault("lan_mac_address", mac.group(1))
-                    if is_wireless:
-                        data.setdefault("wlanMac", mac.group(1))
-                ip = re.search(r"inet addr:([0-9.]+)", block)
-                if not ip:
-                    ip = re.search(r"\binet ([0-9.]+)", block)
-                if ip:
-                    data.setdefault("ip_address", ip.group(1))
-                    if is_ethernet:
-                        data.setdefault("lan_ip_address", ip.group(1))
-                    if is_ppp:
-                        data.setdefault("ppp_ip", ip.group(1))
+        data["ssid"] = ssid.group(1).strip() if ssid else mca.get("essid")
+        if freq:
+            data["frequency"] = round(float(freq.group(1)) * 1000, 0)
+        else:
+            data["frequency"] = _number(mca.get("freq"))
+        data["channel"] = int(channel.group(1)) if channel else _number(mca.get("channel"))
+        data["channel_width"] = mca.get("chanbw") or mca.get("channelWidth")
+        data["tx_power"] = int(txpower.group(1)) if txpower else _number(mca.get("txpower"))
+        data["wireless_mode"] = mode.group(1) if mode else mca.get("wlanOpmode") or mca.get("ieeemode")
+        if rates:
+            data["tx_data_rate"] = float(rates[0])
+            data["rx_data_rate"] = float(rates[1]) if len(rates) > 1 else float(rates[0])
+        else:
+            data["tx_data_rate"] = _number(mca.get("wlanTxRate"))
+            data["rx_data_rate"] = _number(mca.get("wlanRxRate"))
+        if not data.get("wlan_mac") and ap and ap.group(1) != "00:00:00:00:00:00":
+            # Access Point is AP MAC; interface MAC may differ, keep as fallback only
+            pass
 
-                flags = re.search(r"<([^>]+)>", block)
-                if flags:
-                    state = "up" if "UP" in flags.group(1).split(",") else "down"
-                    data.setdefault(f"{prefix}_interface_state", state)
-                    if is_ethernet:
-                        data["ethernet_interface_state"] = "ON" if state == "up" else "OFF"
-                elif re.search(r"(?m)^\s*UP(?:\s|$)", block):
-                    data.setdefault(f"{prefix}_interface_state", "up")
-                    if is_ethernet:
-                        data["ethernet_interface_state"] = "ON"
-                elif re.search(r"(?m)^\s*DOWN(?:\s|$)", block):
-                    data.setdefault(f"{prefix}_interface_state", "down")
-                    if is_ethernet:
-                        data["ethernet_interface_state"] = "OFF"
+    @staticmethod
+    def _parse_wireless_mca(mca: dict, data: dict):
+        signal = _number(mca.get("signal"))
+        noise = _number(mca.get("noise"))
+        ccq = _number(mca.get("ccq"))
+        data["signal_strength"] = signal
+        data["noise_floor"] = noise
+        data["snr"] = (signal - noise) if signal is not None and noise is not None else None
+        data["ccq"] = round(ccq / 10, 1) if ccq is not None else None
+        data["wlan_rx_bytes"] = _number(mca.get("wlanRxBytes"))
+        data["wlan_tx_bytes"] = _number(mca.get("wlanTxBytes"))
+        data["wlan_rx_errors"] = _number(mca.get("wlanRxErrors"))
+        data["wlan_tx_errors"] = _number(mca.get("wlanTxErrors"))
 
-        elif name == "netdev":
-            # Prefer physical interfaces to bridge aliases, avoiding br0 counters
-            # being mislabeled as the physical Ethernet port when eth0 is present.
-            counters = {}
-            for line in output.splitlines():
-                if ":" not in line:
-                    continue
-                interface, stats = line.split(":", 1)
-                interface = interface.strip().lower()
-                values = stats.split()
-                if len(values) < 11:
-                    continue
-                if interface.startswith(("wlan", "ath")):
-                    prefix, priority = "wireless", 2
-                elif interface.startswith("ppp"):
-                    prefix, priority = "ppp", 2
-                elif interface.startswith("eth"):
-                    prefix, priority = "ethernet", 2
-                elif interface.startswith("br"):
-                    prefix, priority = "ethernet", 1
-                else:
-                    continue
-                try:
-                    rx_bytes = int(values[0])
-                    rx_packets = int(values[1])
-                    rx_errors = int(values[2])
-                    tx_bytes = int(values[8])
-                    tx_packets = int(values[9])
-                    tx_errors = int(values[10])
-                except (TypeError, ValueError, IndexError):
-                    _LOGGER.debug("Skipping malformed /proc/net/dev row: %s", line)
-                    continue
-                previous = counters.get(prefix)
-                if previous is None or priority > previous[0]:
-                    counters[prefix] = (
-                        priority, rx_bytes, rx_packets, rx_errors,
-                        tx_bytes, tx_packets, tx_errors,
-                    )
-            for prefix, values in counters.items():
-                _, rx_bytes, rx_packets, rx_errors, tx_bytes, tx_packets, tx_errors = values
-                data[f"{prefix}_rx_bytes"] = rx_bytes
-                data[f"{prefix}_tx_bytes"] = tx_bytes
-                if prefix == "ethernet":
-                    data["lan_rx_packets"] = rx_packets
-                    data["lan_rx_errors"] = rx_errors
-                    data["lan_tx_packets"] = tx_packets
-                    data["lan_tx_errors"] = tx_errors
-                elif prefix == "ppp":
-                    data["ppp_rx_bytes"] = rx_bytes
-                    data["ppp_rx_packets"] = rx_packets
-                    data["ppp_rx_errors"] = rx_errors
-                    data["ppp_tx_bytes"] = tx_bytes
-                    data["ppp_tx_packets"] = tx_packets
-                    data["ppp_tx_errors"] = tx_errors
+    @staticmethod
+    def _parse_athstats(text: str, data: dict):
+        if not text.strip():
+            data["wireless_retries"] = None
+            data["radio_statistics"] = None
+            data["radio_statistics_raw"] = None
+            return
+        retries = re.search(r"tx failed due to too many retries\s*[:=]?\s*(\d+)", text, re.IGNORECASE)
+        if not retries:
+            retries = re.search(r"retries\s*[:=]?\s*(\d+)", text, re.IGNORECASE)
+        data["wireless_retries"] = int(retries.group(1)) if retries else None
+        lines = [l for l in text.splitlines() if l.strip()]
+        data["radio_statistics"] = f"{len(lines)} lines"
+        data["radio_statistics_raw"] = text
+
+    @staticmethod
+    def _parse_wstalist(text: str, data: dict):
+        if not text.strip():
+            data["connected_stations"] = 0
+            data["connected_stations_raw"] = None
+            return
+        macs = re.findall(r"([0-9A-Fa-f:]{17})", text)
+        data["connected_stations"] = len(set(macs)) if macs else len([l for l in text.splitlines() if l.strip()])
+        data["connected_stations_raw"] = text
+
+    @staticmethod
+    def _count_iwlist_scan(text: str) -> int | None:
+        if not text.strip():
+            return None
+        cells = re.findall(r"Cell\s+\d+\s+-", text)
+        if cells:
+            return len(cells)
+        essids = re.findall(r"ESSID:", text)
+        return len(essids) if essids else None

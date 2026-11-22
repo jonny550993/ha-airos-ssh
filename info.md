@@ -9,7 +9,7 @@ Home Assistant custom integration for monitoring legacy Ubiquiti airOS 4.x radio
 - **Issues:** https://github.com/jonny5509/ha-airos-ssh/issues
 - **Related HTTP integration:** https://github.com/jonny5509/ha-airos-http
 
-Features and sensor availability depend on the radio model, firmware, and commands or counters exposed by the device. Optional CPU, memory, load, and system diagnostic probes are best-effort.
+This integration exposes SSH-based sensors for system, Ethernet, and wireless information on legacy Ubiquiti NanoStation5 airOS devices, plus a reboot button.
 
 **Security:** The current connection configuration does not verify the server host key, and some older devices may require legacy SSH algorithms. Use only on a trusted LAN or VPN and do not expose the radio's management interface to the public internet.
 
