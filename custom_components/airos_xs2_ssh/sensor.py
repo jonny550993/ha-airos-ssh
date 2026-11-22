@@ -2,7 +2,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 
 from .const import DOMAIN, device_identifier
 
@@ -1241,6 +1241,26 @@ class AiRXS2Sensor(SensorEntity):
             self._attr_state_class = SensorStateClass.MEASUREMENT
 
 
+
+
+        diagnostic_keys = {
+            "device_id", "deviceId", "firmwareVersion", "firmware_version", "firmware_upgrade",
+            "kernel_version", "uptime_seconds", "cpu_usage", "system_load",
+            "total_memory_bytes", "free_memory_bytes", "ram_usage_percent",
+            "running_processes", "system_date_time", "system_logs", "storage_usage", "filesystem_mounts",
+            "ip_address", "deviceIp", "mac", "hostname", "device_name", "device_model", "platform",
+            "ethernet_interface", "ethernet_mac_address", "lan_ip_address", "lan_subnet_mask",
+            "ethernet_link_status", "ethernet_speed", "ethernet_duplex",
+            "lan_rx_errors", "lan_tx_errors", "lan_rx_dropped", "lan_tx_dropped",
+            "routing_table", "arp_table", "bridge_information",
+            "wireless_interface", "wireless_mac_address", "wlanMac", "wireless_mac",
+            "wireless_interface_state", "wireless_mode", "mode", "ssid", "essid",
+            "channel", "channel_width", "tx_power", "frequency", "frequency_mhz",
+            "apmac", "cfg_crc", "distance", "ack_timeout", "latitude", "longitude",
+            "radio_date_time", "radio_statistics", "connected_stations", "available_networks",
+        }
+        if key in diagnostic_keys or key.startswith("firmware_upgrade_") or key.startswith("mem_"):
+            self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
 
