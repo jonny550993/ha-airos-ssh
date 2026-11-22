@@ -29,73 +29,76 @@ BASE_SENSORS = {
 
 
 OPTIONAL_SENSORS = {
-
     "essid": ("SSID", None),
-
+    "ssid": ("SSID", None),
     "frequency": ("Frequency", "MHz"),
-
+    "frequency_mhz": ("Frequency", "MHz"),
+    "channel": ("Channel", None),
+    "channel_width": ("Channel Width", None),
+    "tx_power": ("TX Power", None),
+    "signal_strength": ("Signal Strength", "dBm"),
+    "noise_floor": ("Noise Floor", "dBm"),
+    "wireless_interface": ("Wireless Interface", None),
+    "wireless_mac_address": ("Wireless MAC Address", None),
+    "wireless_retries": ("Wireless Retries", None),
+    "connected_stations": ("Connected Stations", None),
+    "radio_statistics": ("Radio Statistics", None),
+    "available_networks": ("Available Networks", None),
     "wlanMac": ("Wireless MAC Address", None),
-
     "lan_ip_address": ("LAN IP Address", None),
-
     "lan_mac_address": ("Ethernet MAC Address", None),
-
     "ethernet_interface_state": ("Ethernet Link Status", None),
-
     "wireless_interface_state": ("Wireless Interface State", None),
-
     "wireless_mac": ("Wireless MAC Address", None),
-
     "mac": ("Device MAC Address", None),
-
     "mode": ("Wireless Mode", None),
-
     "hostname": ("Hostname", None),
-
     "uptime_seconds": ("Uptime", "s"),
-
     "ip_address": ("Device IP Address", None),
-
     "cpu_model": ("CPU Model", None),
-
     "cpu_usage": ("CPU Usage", "%"),
-
     "firmware_upgrade": ("Firmware Upgrade", None),
-
     "apmac": ("AP MAC", None), "cfg_crc": ("Config CRC", None),
-
     "device_model": ("Device Model", None), "distance": ("Distance", None),
-
     "ack_timeout": ("ACK Timeout", None), "latitude": ("Latitude", None),
-
     "longitude": ("Longitude", None), "radio_date_time": ("Radio Date and Time", None),
-
     "ppp_ip": ("PPP IP Address", None), "ppp_rx_errors": ("PPP Receive Errors", None),
-
     "ppp_rx_bytes": ("PPP Received Data", "B"), "ppp_rx_packets": ("PPP Received Packets", None),
-
     "ppp_tx_errors": ("PPP Transmit Errors", None), "ppp_tx_bytes": ("PPP Transmitted Data", "B"),
-
     "ppp_tx_packets": ("PPP Transmitted Packets", None),
-
     "ram_usage_percent": ("RAM Usage", "%"),
-
     "ethernet_rx_bytes": ("RX Bytes", "B"),
-
     "ethernet_tx_bytes": ("TX Bytes", "B"),
-
     "lan_rx_errors": ("RX Errors", None),
-
     "lan_rx_packets": ("RX Packets", None),
-
     "lan_tx_errors": ("TX Errors", None),
-
     "lan_tx_packets": ("TX Packets", None),
-
     "wireless_rx_bytes": ("Wireless RX Bytes", "B"),
-
     "wireless_tx_bytes": ("Wireless TX Bytes", "B"),
-
+    "wlan_rx_bytes": ("Wireless RX Bytes", "B"),
+    "wlan_tx_bytes": ("Wireless TX Bytes", "B"),
+    "wlan_rx_errors": ("Wireless RX Errors", None),
+    "wlan_tx_errors": ("Wireless TX Errors", None),
+    "kernel_version": ("Kernel Version", None),
+    "system_load": ("System Load", None),
+    "total_memory_bytes": ("Total Memory", "B"),
+    "free_memory_bytes": ("Free Memory", "B"),
+    "running_processes": ("Running Processes", None),
+    "system_date_time": ("System Date/Time", None),
+    "system_logs": ("System Logs", None),
+    "storage_usage": ("Storage Usage", None),
+    "filesystem_mounts": ("Filesystem Mounts", None),
+    "ethernet_interface": ("Ethernet Interface", None),
+    "ethernet_mac_address": ("Ethernet MAC Address", None),
+    "lan_subnet_mask": ("Subnet Mask", None),
+    "ethernet_link_status": ("Ethernet Link Status", None),
+    "ethernet_speed": ("Ethernet Speed", None),
+    "ethernet_duplex": ("Ethernet Duplex", None),
+    "lan_rx_dropped": ("RX Dropped Packets", None),
+    "lan_tx_dropped": ("TX Dropped Packets", None),
+    "routing_table": ("Routing Table", None),
+    "arp_table": ("ARP Table", None),
+    "bridge_information": ("Bridge Information", None),
 }
 
 
@@ -161,6 +164,48 @@ def _parse_device_name(raw_name):
 
 
 SENSOR_NAME_OVERRIDES = {
+    "device_status": "Device Status",
+    "device_name": "Device Name",
+    "device_id": "Device ID",
+    "firmware_version": "Firmware Version",
+    "kernel_version": "Kernel Version",
+    "system_load": "System Load",
+    "total_memory_bytes": "Total Memory",
+    "free_memory_bytes": "Free Memory",
+    "running_processes": "Running Processes",
+    "system_date_time": "System Date/Time",
+    "system_logs": "System Logs",
+    "storage_usage": "Storage Usage",
+    "filesystem_mounts": "Filesystem Mounts",
+    "ethernet_interface": "Ethernet Interface",
+    "ethernet_mac_address": "Ethernet MAC Address",
+    "lan_subnet_mask": "Subnet Mask",
+    "ethernet_link_status": "Ethernet Link Status",
+    "ethernet_speed": "Ethernet Speed",
+    "ethernet_duplex": "Ethernet Duplex",
+    "lan_rx_dropped": "RX Dropped Packets",
+    "lan_tx_dropped": "TX Dropped Packets",
+    "routing_table": "Routing Table",
+    "arp_table": "ARP Table",
+    "bridge_information": "Bridge Information",
+    "wireless_interface": "Wireless Interface",
+    "wireless_mac_address": "Wireless MAC Address",
+    "wireless_mode": "Wireless Mode",
+    "ssid": "SSID",
+    "frequency_mhz": "Frequency",
+    "channel": "Channel",
+    "channel_width": "Channel Width",
+    "tx_power": "TX Power",
+    "signal_strength": "Signal Strength",
+    "noise_floor": "Noise Floor",
+    "wlan_rx_bytes": "Wireless RX Bytes",
+    "wlan_tx_bytes": "Wireless TX Bytes",
+    "wlan_rx_errors": "Wireless RX Errors",
+    "wlan_tx_errors": "Wireless TX Errors",
+    "wireless_retries": "Wireless Retries",
+    "connected_stations": "Connected Stations",
+    "radio_statistics": "Radio Statistics",
+    "available_networks": "Available Networks",
 
     "signal": "Signal Strength",
 
@@ -411,26 +456,36 @@ def _friendly_name(key):
 
 
 def _device_kind(key):
-
     """Return the Home Assistant device that should own this sensor."""
-
     normalized = key.lower()
-
-    # Keep the requested diagnostics on the main radio device in both transports.
-
-    if key in {"signal","noise","wlanTxRate","wlanRxRate","frequency","apmac","cfg_crc",
-
+    # System/main device
+    if key in {"apmac","cfg_crc",
         "device_model","distance","ack_timeout","latitude","longitude","radio_date_time",
-
         "ppp_ip","ppp_rx_errors","ppp_rx_bytes","ppp_rx_packets","ppp_tx_errors",
-
-        "ppp_tx_bytes","ppp_tx_packets","mac","hostname","uptime_seconds","cpu_model",
-
+        "ppp_tx_bytes","ppp_tx_packets","hostname","uptime_seconds","cpu_model",
         "cpu_usage","ram_usage_percent","firmware_upgrade","deviceId","firmwareVersion",
-
-        "platform","deviceIp"}:
-
+        "platform","deviceIp","device_status","device_name","device_id","firmware_version",
+        "kernel_version","system_load","total_memory_bytes","free_memory_bytes",
+        "running_processes","system_date_time","system_logs","storage_usage","filesystem_mounts"}:
         return "main"
+    # Wireless
+    if normalized.startswith(("wlan", "wireless_")) or key in BASE_SENSORS or key in {
+        "essid", "ssid", "frequency", "frequency_mhz", "wireless_mac", "wireless_mac_address",
+        "wireless_interface", "wireless_interface_state", "mode", "wireless_mode",
+        "wmac", "wip", "channel", "channel_width", "tx_power", "security", "qos", "antenna", "ack", "rstatus",
+        "err_nwids", "err_crypts", "err_frags", "err_retries", "err_beacons", "err_misc",
+        "signal_strength", "noise_floor", "wlan_rx_bytes", "wlan_tx_bytes", "wlan_rx_errors", "wlan_tx_errors",
+        "wireless_retries", "connected_stations", "radio_statistics", "available_networks",
+    }:
+        return "wireless"
+    # Ethernet
+    if key in {"ethernet_interface", "ethernet_mac_address", "lan_subnet_mask", "ethernet_link_status",
+        "ethernet_speed", "ethernet_duplex", "lan_rx_dropped", "lan_tx_dropped",
+        "routing_table", "arp_table", "bridge_information"}:
+        return "lan"
+    if normalized.startswith(("ethernet_", "lan", "eth")) or normalized in {"ethernet_mac", "lip", "lmac", "mac"}:
+        return "lan"
+    return "main"
 
     # Check WLAN first because "lan" is also present inside "wlan".
 
