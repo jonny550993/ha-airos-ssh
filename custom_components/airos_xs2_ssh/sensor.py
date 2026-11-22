@@ -1043,17 +1043,31 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 
-    # Keep only one MAC Address sensor per device.
+    # Remove duplicates per device (same key or same name), not across devices.
+    seen_keys = set()
     mac_seen = set()
     deduped = []
     for s in sensors:
-        name = (s._attr_name or "").lower()
         kind = getattr(s, "_device_kind", "main")
+        key = getattr(s, "key", None) or getattr(s, "_key", None)
+        name = (s._attr_name or "").strip().lower()
+
+        key_id = (kind, key) if key else None
+        name_id = (kind, name)
+        if key_id and key_id in seen_keys:
+            continue
+        if name_id in seen_keys:
+            continue
+        if key_id:
+            seen_keys.add(key_id)
+        seen_keys.add(name_id)
+
         is_mac = "mac address" in name or name.endswith(" mac") or name == "mac"
         if is_mac:
             if kind in mac_seen:
                 continue
             mac_seen.add(kind)
+
         deduped.append(s)
     sensors = deduped
 
